@@ -296,6 +296,97 @@ function onOpen() {
 | Many external users | `USE_WHITELIST_SHEET: true` |
 | Testing (no restriction) | `ENABLED: false` |
 
+---
+
+## Advanced Access Control (PropertiesService + Google Groups)
+
+For production dashboards, use this more robust approach:
+
+- **PropertiesService storage** - No external spreadsheet needed
+- **Google Groups support** - Access auto-updates when users join/leave
+- **Permanent admins** - Can't accidentally lock yourself out
+- **Admin UI** - Manage access from within the dashboard
+- **Server-side security** - Check runs before any content is sent
+
+### Core Pattern
+
+```javascript
+// AccessControl.js
+
+var ADMIN_EMAILS = ['admin@domain.com'];
+var ACCESS_PROP_KEY = 'access_entries';
+
+function checkUserAccess(userEmail) {
+  if (!userEmail) return false;
+  userEmail = userEmail.toLowerCase().trim();
+  
+  // 1. Check hardcoded admins
+  for (var i = 0; i < ADMIN_EMAILS.length; i++) {
+    if (ADMIN_EMAILS[i].toLowerCase() === userEmail) return true;
+  }
+  
+  // 2. Check stored entries
+  var entries = getStoredEntries();
+  for (var j = 0; j < entries.length; j++) {
+    var entry = entries[j];
+    if (entry.type === 'EMAIL' && entry.value.toLowerCase() === userEmail) {
+      return true;
+    }
+    if (entry.type === 'GROUP' && isUserInGroup(userEmail, entry.value)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isUserInGroup(userEmail, groupEmail) {
+  try {
+    return GroupsApp.getGroupByEmail(groupEmail).hasUser(userEmail);
+  } catch (e) {
+    return false;
+  }
+}
+
+function getStoredEntries() {
+  var json = PropertiesService.getScriptProperties().getProperty(ACCESS_PROP_KEY);
+  return json ? JSON.parse(json) : [];
+}
+
+function saveStoredEntries(entries) {
+  PropertiesService.getScriptProperties().setProperty(ACCESS_PROP_KEY, JSON.stringify(entries));
+}
+```
+
+### doGet() with Access Gate
+
+```javascript
+function doGet(e) {
+  var userEmail = Session.getActiveUser().getEmail();
+  
+  if (!checkUserAccess(userEmail)) {
+    return HtmlService.createTemplateFromFile('AccessDenied')
+      .evaluate()
+      .setTitle('Access Restricted');
+  }
+  
+  var template = HtmlService.createTemplateFromFile('Index');
+  template.userEmail = userEmail;
+  template.isAdmin = isCurrentUserAdmin();
+  return template.evaluate().setTitle('Dashboard');
+}
+```
+
+### Comparison
+
+| Feature | Simple (Sheet) | Advanced (PropertiesService) |
+|---------|----------------|------------------------------|
+| Google Groups | No | Yes |
+| Admin UI | No | Yes |
+| External dependency | Requires sheet | Self-contained |
+| Best for | Simple tools | Production dashboards |
+
+---
+
 ## Specification Compliance
 
 ### CRITICAL: Never Remove Specified Features
