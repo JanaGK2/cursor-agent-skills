@@ -1,6 +1,22 @@
-# Cursor Agent Skills
+# Agent Skills for Google Apps Script & Sheets
 
-A collection of skills for Cursor AI agents to help with Google Apps Script dashboards, Google Sheets management, and conversation context management.
+A collection of Agent Skills for building Google Apps Script dashboards, managing Google Sheets programmatically, and handling long conversation context.
+
+## Compatible Tools
+
+These skills use the open [Agent Skills standard](https://agentskills.io) and work with **16+ AI coding tools**:
+
+| Tool | Developer | Directory |
+|------|-----------|-----------|
+| **Cursor** | Anysphere | `~/.cursor/skills/` |
+| **Claude Code** | Anthropic | `~/.claude/skills/` |
+| **Gemini CLI** | Google | `~/.gemini/skills/` |
+| **OpenAI Codex** | OpenAI | `~/.codex/skills/` |
+| **GitHub Copilot** | GitHub | `.github/skills/` |
+| **VS Code** | Microsoft | `.vscode/skills/` |
+| **Junie** | JetBrains | `.junie/skills/` |
+
+And more - see [agentskills.io](https://agentskills.io) for the full list.
 
 ## Skills Included
 
@@ -59,17 +75,33 @@ Manage long conversation context to prevent LLM degradation.
 
 ## Installation
 
-### For Cursor Users
+### Quick Install (Any Tool)
 
-1. Copy the skill folders to your Cursor skills directory:
-   ```bash
-   cp -r apps-script-dashboard ~/.cursor/skills/
-   cp -r apps-script-visualizations ~/.cursor/skills/
-   cp -r google-sheets-management ~/.cursor/skills/
-   cp -r context-handoff ~/.cursor/skills/
-   ```
+Copy the skill folders to your tool's skills directory:
 
-2. The skills will automatically be available in your Cursor agent sessions.
+```bash
+# For Cursor
+cp -r apps-script-dashboard ~/.cursor/skills/
+cp -r apps-script-visualizations ~/.cursor/skills/
+cp -r google-sheets-management ~/.cursor/skills/
+cp -r context-handoff ~/.cursor/skills/
+
+# For Claude Code
+cp -r apps-script-dashboard ~/.claude/skills/
+cp -r apps-script-visualizations ~/.claude/skills/
+cp -r google-sheets-management ~/.claude/skills/
+cp -r context-handoff ~/.claude/skills/
+
+# For other tools, use the appropriate directory from the table above
+```
+
+### Install from GitHub (Cursor 2.4+)
+
+1. Open **Cursor Settings → Rules**
+2. Click **Add Rule → Remote Rule (GitHub)**
+3. Enter: `https://github.com/JanaGK2/cursor-agent-skills`
+
+Skills will automatically be available in your agent sessions.
 
 ### Skill Structure
 
@@ -84,11 +116,17 @@ skill-name/
 
 ## Usage
 
-Skills are automatically loaded by Cursor agents when relevant. You can also explicitly reference them:
+Skills are automatically loaded when relevant. You can also invoke them explicitly:
 
 ```
-@apps-script-dashboard build me a dashboard for this data
+# Cursor / Claude Code
+/apps-script-dashboard build me a dashboard for this data
+
+# Or reference as context
+@apps-script-dashboard
 ```
+
+The agent reads the skill instructions and applies the patterns automatically.
 
 ## Requirements
 
