@@ -376,6 +376,55 @@ function doGet(e) {
 }
 ```
 
+### Admin Settings Button
+
+In your navbar, add a settings button (hidden by default, shown to admins):
+
+```html
+<button id="settings-btn" class="btn btn--icon" title="Settings" style="display: none;">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+    <circle cx="12" cy="12" r="3"></circle>
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 
+    1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 
+    19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 
+    .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 
+    0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 
+    1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 
+    1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 
+    0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+  </svg>
+</button>
+```
+
+### Inject Admin Flag into Template
+
+At the bottom of Index.html, before your JavaScript include:
+
+```html
+<script>
+  var CURRENT_USER_EMAIL = '<?= userEmail ?>';
+  var CURRENT_USER_IS_ADMIN = <?= isAdmin ?>;
+</script>
+<?!= include('JavaScript'); ?>
+```
+
+### Initialize Admin UI in JavaScript
+
+```javascript
+function initAdminUI() {
+  if (typeof CURRENT_USER_IS_ADMIN !== 'undefined' && CURRENT_USER_IS_ADMIN) {
+    var btn = document.getElementById('settings-btn');
+    if (btn) btn.style.display = '';
+  }
+}
+
+// Call during initialization
+document.addEventListener('DOMContentLoaded', function() {
+  initAdminUI();
+  // ... other init code
+});
+```
+
 ### Comparison
 
 | Feature | Simple (Sheet) | Advanced (PropertiesService) |
@@ -1021,6 +1070,47 @@ function clearCache() {
 ```
 
 **Run `clearCache()` from Apps Script editor after ANY data upload.**
+
+---
+
+## Pre-Aggregated Sheets: Include ALL Filter Columns
+
+When using pre-aggregated summary sheets for performance, **every filter must have its column in the summary sheet**.
+
+### The Problem
+
+If you have a filter for "Category" but `accounts_summary` doesn't have a Category column, the filter silently does nothing because the filter logic checks `if ('Category' in row)` first.
+
+### The Solution
+
+**List ALL filters → Include ALL columns:**
+
+```
+Dashboard Filters          →  accounts_summary Columns Needed
+─────────────────────────────────────────────────────────────
+Geo, Region, Subregion     →  Geo, Region, Subregion
+Industry, Segment          →  Industry, Segment
+Category, Subcategory      →  Categories, Subcategories (pipe-separated)
+Completeness, Confidence   →  Completeness Level, Confidence
+```
+
+### Multi-Value Columns
+
+When an account has multiple values (e.g., initiatives in 3 different categories):
+
+```
+Categories: "Enterprise Automation|Virtualization|Container Management Platform"
+```
+
+Filter logic must handle pipe-separated values:
+
+```javascript
+if ('Categories' in row) {
+  const cats = (row['Categories'] || '').split('|').map(c => c.trim());
+  const hasMatch = filters.category.some(fc => cats.includes(fc));
+  if (!hasMatch) return false;
+}
+```
 
 ---
 
