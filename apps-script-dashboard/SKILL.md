@@ -159,7 +159,7 @@ function getSpreadsheet() {
 // ============================================================
 const ACCESS_CONFIG = {
   ENABLED: true,
-  ALLOWED_DOMAIN: '',             // e.g., '@company.com' - leave empty to disable domain check
+  ALLOWED_DOMAIN: '',             // e.g., '@redhat.com' - leave empty to disable domain check
   ALLOWED_EMAILS: [               // Hardcoded fallback emails
     'admin@example.com',
   ],
@@ -223,13 +223,18 @@ function doGet() {
   const access = checkAccess();
   
   if (!access.authorized) {
+    // Include debug info to help troubleshoot access issues
     return HtmlService.createHtmlOutput(
       `<html><body style="font-family:sans-serif;text-align:center;padding:50px;">
-        <h1 style="color:#CC0000;">Access Denied</h1>
+        <h1 style="color:#EE0000;">Access Denied</h1>
         <p><strong>Reason:</strong> ${access.reason}</p>
         <p><strong>Your email:</strong> ${access.email || 'Could not detect'}</p>
         <hr style="margin:30px 0;">
         <p style="color:#666;">Contact the dashboard administrator to request access.</p>
+        <p style="color:#999;font-size:12px;">
+          Debug: Domain=${ACCESS_CONFIG.ALLOWED_DOMAIN || 'none'}, 
+          Sheet=${ACCESS_CONFIG.USE_WHITELIST_SHEET ? 'enabled' : 'disabled'}
+        </p>
       </body></html>`
     ).setTitle('Access Denied');
   }
@@ -251,7 +256,7 @@ If using `USE_WHITELIST_SHEET: true`:
 Example:
 | Email | Notes |
 |-------|-------|
-| user1@example.com | Added 2024-01-15 |
+| user1@example.com | Added 2026-05-25 |
 | user2@example.com | External partner |
 
 ### Helper: Create/Manage Whitelist Sheet
@@ -267,7 +272,7 @@ function manageWhitelist() {
     sheet = ss.insertSheet('Whitelist');
     sheet.getRange('A1:B1').setValues([['Email', 'Notes']]);
     sheet.getRange('A1:B1')
-      .setBackground('#333333')
+      .setBackground('#EE0000')
       .setFontColor('#FFFFFF')
       .setFontWeight('bold');
     sheet.setColumnWidth(1, 250);
@@ -300,139 +305,429 @@ function onOpen() {
 
 ## Advanced Access Control (PropertiesService + Google Groups)
 
-For production dashboards, use this more robust approach:
+For production dashboards with sensitive data, use this more robust approach:
 
-- **PropertiesService storage** - No external spreadsheet needed
-- **Google Groups support** - Access auto-updates when users join/leave
-- **Permanent admins** - Can't accidentally lock yourself out
-- **Admin UI** - Manage access from within the dashboard
-- **Server-side security** - Check runs before any content is sent
+- **PropertiesService storage** - No external spreadsheet to manage permissions for
+- **Google Groups support** - Access auto-updates when users join/leave groups
+- **Permanent admins** - Hardcoded admins can't accidentally lock themselves out
+- **Admin UI** - Manage access from within the dashboard (no code editing)
+- **Server-side security** - Access check runs before any content is sent to browser
 
-### Core Pattern
+### Architecture
+
+```
+User visits web app URL
+        |
+        v
+doGet() -> Session.getActiveUser().getEmail()
+        |
+        v
+checkUserAccess(email) checks:
+  1. Hardcoded ADMIN_EMAILS array
+  2. Stored EMAIL entries (PropertiesService)
+  3. Stored GROUP entries (GroupsApp membership)
+        |
+    +-- GRANTED --> Render dashboard (Index.html)
+    |               + inject isAdmin flag
+    |               + show Settings button if admin
+    |
+    +-- DENIED --> Render AccessDenied.html
+                   + show user's email
+                   + show contact for requesting access
+```
+
+### Storage
+
+- **Engine**: `PropertiesService.getScriptProperties()` (built-in key-value store)
+- **Key**: `access_entries`
+- **Value**: JSON array of `{ type: "EMAIL"|"GROUP", value: "user@domain.com", description: "optional" }`
+- **Limits**: 9KB per property (hundreds of entries)
+- **Persistence**: Survives redeployments and code pushes
+
+### Step 1: Create AccessControl.js
 
 ```javascript
-// AccessControl.js
+/**
+ * AccessControl.js - Access Control using PropertiesService
+ * 
+ * Supports: individual emails, Google Groups, permanent admins
+ * Storage: PropertiesService (no external sheets required)
+ */
 
-var ADMIN_EMAILS = ['admin@domain.com'];
+// ============================================================
+// CONFIGURATION - UPDATE THESE FOR YOUR DEPLOYMENT
+// ============================================================
+
+// Permanent admins - always have access, cannot be deleted from UI
+var ADMIN_EMAILS = [
+  'your-email@domain.com'  // <-- REPLACE with actual admin email
+];
+
+// Contact shown on Access Denied page
+var ACCESS_CONTACT = {
+  name: 'Your Name',           // <-- REPLACE
+  email: 'your-email@domain.com'  // <-- REPLACE
+};
+
+// PropertiesService key for stored entries
 var ACCESS_PROP_KEY = 'access_entries';
 
+// ============================================================
+// ACCESS CHECK
+// ============================================================
+
+/**
+ * Check whether the given email is allowed to access the dashboard.
+ * Priority: hardcoded admins > stored emails > stored groups.
+ */
 function checkUserAccess(userEmail) {
   if (!userEmail) return false;
   userEmail = userEmail.toLowerCase().trim();
   
-  // 1. Check hardcoded admins
+  // 1. Hardcoded admins
   for (var i = 0; i < ADMIN_EMAILS.length; i++) {
-    if (ADMIN_EMAILS[i].toLowerCase() === userEmail) return true;
+    if (ADMIN_EMAILS[i].toLowerCase() === userEmail) {
+      console.log('Access granted (admin): ' + userEmail);
+      return true;
+    }
   }
   
-  // 2. Check stored entries
+  // 2. Stored entries (emails and groups)
   var entries = getStoredEntries();
   for (var j = 0; j < entries.length; j++) {
     var entry = entries[j];
     if (entry.type === 'EMAIL' && entry.value.toLowerCase() === userEmail) {
+      console.log('Access granted (email): ' + userEmail);
       return true;
     }
     if (entry.type === 'GROUP' && isUserInGroup(userEmail, entry.value)) {
+      console.log('Access granted (group ' + entry.value + '): ' + userEmail);
       return true;
     }
   }
+  
+  console.log('Access denied: ' + userEmail);
   return false;
 }
 
+/**
+ * Check if a user is a member of a Google Group.
+ */
 function isUserInGroup(userEmail, groupEmail) {
   try {
-    return GroupsApp.getGroupByEmail(groupEmail).hasUser(userEmail);
+    var group = GroupsApp.getGroupByEmail(groupEmail);
+    return group.hasUser(userEmail);
   } catch (e) {
+    console.error('Group check failed for ' + groupEmail + ': ' + e.message);
     return false;
   }
 }
 
+/**
+ * Check if the current user is a hardcoded admin.
+ */
+function isCurrentUserAdmin() {
+  var email = Session.getActiveUser().getEmail().toLowerCase().trim();
+  for (var i = 0; i < ADMIN_EMAILS.length; i++) {
+    if (ADMIN_EMAILS[i].toLowerCase() === email) return true;
+  }
+  return false;
+}
+
+// ============================================================
+// PROPERTIES STORAGE
+// ============================================================
+
 function getStoredEntries() {
-  var json = PropertiesService.getScriptProperties().getProperty(ACCESS_PROP_KEY);
-  return json ? JSON.parse(json) : [];
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var json = props.getProperty(ACCESS_PROP_KEY);
+    if (!json) return [];
+    return JSON.parse(json);
+  } catch (e) {
+    console.error('Failed to read access entries:', e);
+    return [];
+  }
 }
 
 function saveStoredEntries(entries) {
-  PropertiesService.getScriptProperties().setProperty(ACCESS_PROP_KEY, JSON.stringify(entries));
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(ACCESS_PROP_KEY, JSON.stringify(entries));
+}
+
+// ============================================================
+// CLIENT-CALLABLE FUNCTIONS (Settings UI)
+// ============================================================
+
+/**
+ * Get all access entries for display in the Settings modal.
+ */
+function getAccessEntries() {
+  if (!isCurrentUserAdmin()) {
+    return { status: 'error', message: 'Only admins can view access settings.' };
+  }
+  
+  var stored = getStoredEntries();
+  var entries = [];
+  
+  // Add hardcoded admins first (non-deletable)
+  for (var i = 0; i < ADMIN_EMAILS.length; i++) {
+    entries.push({
+      id: 'admin_' + i,
+      type: 'ADMIN',
+      value: ADMIN_EMAILS[i],
+      description: 'Permanent admin (hardcoded)',
+      deletable: false
+    });
+  }
+  
+  // Add stored entries (deletable)
+  for (var j = 0; j < stored.length; j++) {
+    entries.push({
+      id: 'stored_' + j,
+      type: stored[j].type,
+      value: stored[j].value,
+      description: stored[j].description || '',
+      deletable: true
+    });
+  }
+  
+  return {
+    status: 'success',
+    entries: entries,
+    currentUser: Session.getActiveUser().getEmail().toLowerCase()
+  };
+}
+
+/**
+ * Add a new access entry.
+ */
+function addAccessEntry(type, value, description) {
+  if (!isCurrentUserAdmin()) {
+    return { status: 'error', message: 'Only admins can manage access.' };
+  }
+  
+  type = (type || '').toString().toUpperCase().trim();
+  value = (value || '').toString().toLowerCase().trim();
+  description = (description || '').toString().trim();
+  
+  if (!type || !value) {
+    return { status: 'error', message: 'Type and email/group are required.' };
+  }
+  if (['EMAIL', 'GROUP'].indexOf(type) === -1) {
+    return { status: 'error', message: 'Type must be EMAIL or GROUP.' };
+  }
+  if (value.indexOf('@') === -1) {
+    return { status: 'error', message: 'Invalid email format.' };
+  }
+  
+  // Check for duplicates
+  var entries = getStoredEntries();
+  for (var j = 0; j < entries.length; j++) {
+    if (entries[j].value.toLowerCase() === value) {
+      return { status: 'error', message: 'This email/group is already in the access list.' };
+    }
+  }
+  
+  entries.push({ type: type, value: value, description: description });
+  saveStoredEntries(entries);
+  return { status: 'success', message: 'Entry added successfully.' };
+}
+
+/**
+ * Delete a stored access entry by index.
+ */
+function deleteAccessEntry(index) {
+  if (!isCurrentUserAdmin()) {
+    return { status: 'error', message: 'Only admins can manage access.' };
+  }
+  
+  var entries = getStoredEntries();
+  if (index < 0 || index >= entries.length) {
+    return { status: 'error', message: 'Invalid entry index.' };
+  }
+  
+  entries.splice(index, 1);
+  saveStoredEntries(entries);
+  return { status: 'success', message: 'Entry deleted successfully.' };
+}
+
+/**
+ * Returns contact info for the Access Denied page.
+ */
+function getAccessDeniedInfo() {
+  return {
+    contactName: ACCESS_CONTACT.name,
+    contactEmail: ACCESS_CONTACT.email,
+    userEmail: Session.getActiveUser().getEmail() || 'Unknown'
+  };
 }
 ```
 
-### doGet() with Access Gate
+### Step 2: Modify doGet() Entry Point
 
 ```javascript
 function doGet(e) {
   var userEmail = Session.getActiveUser().getEmail();
   
+  // Access gate - check BEFORE rendering anything
   if (!checkUserAccess(userEmail)) {
     return HtmlService.createTemplateFromFile('AccessDenied')
       .evaluate()
-      .setTitle('Access Restricted');
+      .setTitle('Access Restricted')
+      .addMetaTag('viewport', 'width=device-width, initial-scale=1');
   }
   
+  // User is authorized - render dashboard
   var template = HtmlService.createTemplateFromFile('Index');
   template.userEmail = userEmail;
   template.isAdmin = isCurrentUserAdmin();
-  return template.evaluate().setTitle('Dashboard');
+  
+  return template
+    .evaluate()
+    .setTitle('Your Dashboard Name')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 ```
 
-### Admin Settings Button
+### Step 3: Create AccessDenied.html
 
-In your navbar, add a settings button (hidden by default, shown to admins):
-
-```html
-<button id="settings-btn" class="btn btn--icon" title="Settings" style="display: none;">
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <circle cx="12" cy="12" r="3"></circle>
-    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 
-    1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 
-    19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 
-    .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 
-    0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 
-    1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 
-    1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 
-    0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-  </svg>
-</button>
-```
-
-### Inject Admin Flag into Template
-
-At the bottom of Index.html, before your JavaScript include:
+A standalone page shown to unauthorized users (no dashboard code exposed):
 
 ```html
-<script>
-  var CURRENT_USER_EMAIL = '<?= userEmail ?>';
-  var CURRENT_USER_IS_ADMIN = <?= isAdmin ?>;
-</script>
-<?!= include('JavaScript'); ?>
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #151515;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #e0e0e0;
+    }
+    .container {
+      text-align: center;
+      padding: 48px 40px;
+      max-width: 520px;
+      background: #1f1f1f;
+      border: 1px solid #383838;
+      border-radius: 12px;
+    }
+    .lock-icon {
+      width: 64px; height: 64px;
+      margin: 0 auto 24px;
+      background: rgba(238, 0, 0, 0.1);
+      border: 1px solid rgba(238, 0, 0, 0.25);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 28px;
+    }
+    h1 { font-size: 24px; font-weight: 600; color: #ffffff; margin-bottom: 12px; }
+    .subtitle { font-size: 15px; color: #707070; line-height: 1.6; margin-bottom: 28px; }
+    .user-email-box {
+      background: rgba(238, 0, 0, 0.08);
+      border: 1px solid rgba(238, 0, 0, 0.2);
+      border-radius: 8px;
+      padding: 10px 20px;
+      display: inline-block;
+      font-family: monospace;
+      font-size: 13px;
+      color: #ee0000;
+      margin-bottom: 28px;
+    }
+    .contact-card {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: #292929;
+      border: 1px solid #383838;
+      border-radius: 8px;
+      padding: 12px 20px;
+    }
+    .contact-avatar {
+      width: 36px; height: 36px;
+      background: #ee0000;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 14px;
+      color: #ffffff;
+    }
+    .contact-info { text-align: left; }
+    .contact-name { font-size: 14px; font-weight: 600; color: #ffffff; }
+    .contact-email a { font-size: 13px; color: #707070; text-decoration: none; }
+    .contact-email a:hover { color: #ee0000; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="lock-icon">&#x1F512;</div>
+    <h1>Access Restricted</h1>
+    <p class="subtitle">
+      You don't have permission to view this dashboard.<br>
+      Your current account is:
+    </p>
+    <div class="user-email-box" id="user-email">Loading...</div>
+    <p style="font-size: 13px; color: #707070; margin-bottom: 8px;">
+      To request access, contact:
+    </p>
+    <div class="contact-card">
+      <div class="contact-avatar" id="contact-initials">--</div>
+      <div class="contact-info">
+        <div class="contact-name" id="contact-name">Loading...</div>
+        <div class="contact-email">
+          <a href="#" id="contact-email-link">Loading...</a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    google.script.run
+      .withSuccessHandler(function(info) {
+        document.getElementById('user-email').textContent = info.userEmail || 'Unknown';
+        var name = info.contactName || 'Admin';
+        var email = info.contactEmail || '';
+        var parts = name.split(' ');
+        var initials = parts.length >= 2 
+          ? parts[0].charAt(0) + parts[1].charAt(0) 
+          : name.substring(0, 2);
+        document.getElementById('contact-initials').textContent = initials.toUpperCase();
+        document.getElementById('contact-name').textContent = name;
+        document.getElementById('contact-email-link').textContent = email;
+        document.getElementById('contact-email-link').href = 'mailto:' + email;
+      })
+      .getAccessDeniedInfo();
+  </script>
+</body>
+</html>
 ```
 
-### Initialize Admin UI in JavaScript
+### Comparison: Simple vs Advanced Access Control
 
-```javascript
-function initAdminUI() {
-  if (typeof CURRENT_USER_IS_ADMIN !== 'undefined' && CURRENT_USER_IS_ADMIN) {
-    var btn = document.getElementById('settings-btn');
-    if (btn) btn.style.display = '';
-  }
-}
-
-// Call during initialization
-document.addEventListener('DOMContentLoaded', function() {
-  initAdminUI();
-  // ... other init code
-});
-```
-
-### Comparison
-
-| Feature | Simple (Sheet) | Advanced (PropertiesService) |
-|---------|----------------|------------------------------|
-| Google Groups | No | Yes |
-| Admin UI | No | Yes |
+| Feature | Simple (Whitelist Sheet) | Advanced (PropertiesService) |
+|---------|--------------------------|------------------------------|
+| Storage | Google Sheet tab | Built-in key-value store |
+| Google Groups | No | Yes (auto-sync) |
+| Admin UI | No (edit sheet) | Yes (in-dashboard) |
+| Permanent admins | No | Yes (can't lock out) |
 | External dependency | Requires sheet | Self-contained |
-| Best for | Simple tools | Production dashboards |
+| Best for | Simple internal tools | Production dashboards |
+
+### Security Notes
+
+- Access check runs **server-side** in `doGet()` - cannot be bypassed by browser tools
+- All management functions verify `isCurrentUserAdmin()` before executing
+- PropertiesService data is encrypted at rest by Google
+- Group membership is verified in real-time via GroupsApp API
 
 ---
 
@@ -448,7 +743,9 @@ When implementing a dashboard from user specifications:
 4. **Verify end-to-end** before claiming complete
 
 **Common mistake:** Removing a UI filter because the data isn't in the dashboard sheets.
-**Correct approach:** Add the column to your build script, regenerate, re-upload.
+**Correct approach:** Add the column to `build_dashboard_sheets.py`, regenerate, re-upload.
+
+See rule: `follow-specifications-exactly.mdc`
 
 ## Performance Optimization
 
@@ -1062,14 +1359,32 @@ function clearCache() {
   cache.removeAll([
     'accounts_data',
     'category_data', 
+    'tdp_data',
     'filter_options',
-    'kpi_global'
+    'kpi_global',
+    'initiatives_detail'  // Don't forget detail data!
   ]);
   Logger.log('Cache cleared');
 }
 ```
 
 **Run `clearCache()` from Apps Script editor after ANY data upload.**
+
+### Cache Key Naming Conventions
+
+Use consistent prefixes for cache keys:
+
+| Prefix | Purpose | Example |
+|--------|---------|---------|
+| `data_` | Raw data from sheets | `data_accounts`, `data_initiatives` |
+| `agg_` | Aggregated/summary data | `agg_category`, `agg_geo_segment` |
+| `filter_` | Filter options | `filter_options`, `filter_geo` |
+| `kpi_` | KPI calculations | `kpi_global`, `kpi_filtered` |
+
+**Benefits:**
+- Easy to identify what's cached
+- Clear which keys to invalidate after data changes
+- Grep-able in code reviews
 
 ---
 
@@ -1089,9 +1404,56 @@ If you have a filter for "Category" but `accounts_summary` doesn't have a Catego
 Dashboard Filters          →  accounts_summary Columns Needed
 ─────────────────────────────────────────────────────────────
 Geo, Region, Subregion     →  Geo, Region, Subregion
-Industry, Segment          →  Industry, Segment
+Industry, IBM Segment      →  Industry, IBM Customer Segment
+Global Account, PAI        →  Global Account, Platform Acceleration Initiative
 Category, Subcategory      →  Categories, Subcategories (pipe-separated)
 Completeness, Confidence   →  Completeness Level, Confidence
+Maturity (0-5)             →  maturity_rhel, maturity_containers, etc.
+Hyperscaler, Competitor    →  Cloud Providers, Detected Entities (pipe-separated)
+```
+
+### Multi-Value Columns
+
+When an account has multiple values (e.g., initiatives in 3 different categories):
+
+```
+Categories: "Enterprise Automation|Virtualization|Container Management Platform"
+```
+
+Filter logic must handle pipe-separated values:
+
+```javascript
+if ('Categories' in row) {
+  const cats = (row['Categories'] || '').split('|').map(c => c.trim());
+  const hasMatch = filters.category.some(fc => cats.includes(fc));
+  if (!hasMatch) return false;
+}
+```
+
+---
+
+## Pre-Aggregated Sheets: Include ALL Filter Columns
+
+When using pre-aggregated summary sheets for performance, **every filter must have its column in the summary sheet**.
+
+### The Problem
+
+If you have a filter for "Category" but `accounts_summary` doesn't have a Category column, the filter silently does nothing because the filter logic checks `if ('Category' in row)` first.
+
+### The Solution
+
+**List ALL filters → Include ALL columns:**
+
+```
+Dashboard Filters          →  accounts_summary Columns Needed
+─────────────────────────────────────────────────────────────
+Geo, Region, Subregion     →  Geo, Region, Subregion
+Industry, IBM Segment      →  Industry, IBM Customer Segment
+Global Account, PAI        →  Global Account, Platform Acceleration Initiative
+Category, Subcategory      →  Categories, Subcategories (pipe-separated)
+Completeness, Confidence   →  Completeness Level, Confidence
+Maturity (0-5)             →  maturity_rhel, maturity_containers, etc.
+Hyperscaler, Competitor    →  Cloud Providers, Detected Entities (pipe-separated)
 ```
 
 ### Multi-Value Columns
@@ -1123,42 +1485,82 @@ if ('Categories' in row) {
 | Script runtime | 6 min / execution | 6 min / execution |
 | Custom function runtime | 30 sec / execution | 30 sec / execution |
 | Simultaneous executions per user | 30 | 30 |
+| Simultaneous executions per script | 1,000 | 1,000 |
 | Triggers per user per script | 20 | 20 |
+| Trigger runtime | 90 min / day | 6 hr / day |
 | Properties value size | 9 KB / val | 9 KB / val |
 | Properties total storage | 500 KB | 500 KB |
 
 ### Web App Concurrency
 
 - **Comfortable concurrency**: ~20-30 concurrent users
-- **Reserved URL parameters**: Never use `c` or `sid` (causes 405 errors)
+- Each `google.script.run` call serializes through the execution queue
+- Past ~30 concurrent users, UI responsiveness suffers
+- **Mitigation**: Cache heavily, load data client-side, filter locally
+
+### Reserved URL Parameters
+
+**Never use these parameter names** in query strings or POST bodies:
+- `c`
+- `sid`
+
+Using these causes 405 errors.
 
 ---
 
 ## Long-Running Task Patterns
 
-Scripts exceeding 6 minutes are terminated. Use chunked processing:
+### The 6-Minute Problem
+
+Scripts exceeding 6 minutes are terminated with "Exceeded maximum execution time".
+
+### Chunked Processing Pattern
+
+Split work across multiple executions using PropertiesService:
 
 ```javascript
 function processLargeDataset() {
   const props = PropertiesService.getScriptProperties();
-  const startIndex = parseInt(props.getProperty('processIndex') || '0');
-  const data = getAllData();
   
-  const MAX_RUNTIME_MS = 5 * 60 * 1000;
+  // Get current progress
+  const startIndex = parseInt(props.getProperty('processIndex') || '0');
+  const data = getAllData();  // Your data source
+  
+  const BATCH_SIZE = 500;
+  const MAX_RUNTIME_MS = 5 * 60 * 1000;  // 5 minutes (leave 1 min buffer)
   const startTime = Date.now();
   
   for (let i = startIndex; i < data.length; i++) {
+    // Check if we need to stop
     if (Date.now() - startTime > MAX_RUNTIME_MS) {
+      // Save progress and schedule continuation
       props.setProperty('processIndex', String(i));
-      ScriptApp.newTrigger('processLargeDataset')
-        .timeBased().after(60000).create();
-      return { status: 'in_progress', processed: i };
+      scheduleContinuation();
+      return { status: 'in_progress', processed: i, total: data.length };
     }
+    
+    // Process item
     processItem(data[i]);
   }
   
+  // Complete - clean up
   props.deleteProperty('processIndex');
-  return { status: 'complete' };
+  deleteScheduledTrigger();
+  return { status: 'complete', processed: data.length };
+}
+
+function scheduleContinuation() {
+  // Create trigger to continue in 1 minute
+  ScriptApp.newTrigger('processLargeDataset')
+    .timeBased()
+    .after(60 * 1000)  // 1 minute
+    .create();
+}
+
+function deleteScheduledTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'processLargeDataset')
+    .forEach(t => ScriptApp.deleteTrigger(t));
 }
 ```
 
@@ -1166,58 +1568,297 @@ function processLargeDataset() {
 
 ## Installable Triggers
 
-```javascript
-// Create time-based triggers
-ScriptApp.newTrigger('refreshData').timeBased().everyHours(6).create();
-ScriptApp.newTrigger('dailyReport').timeBased().atHour(9).everyDays(1).create();
+### Create Triggers Programmatically
 
-// Delete triggers
-ScriptApp.getProjectTriggers()
-  .filter(t => t.getHandlerFunction() === 'functionName')
-  .forEach(t => ScriptApp.deleteTrigger(t));
+```javascript
+// Time-based: every 6 hours
+ScriptApp.newTrigger('refreshData')
+  .timeBased()
+  .everyHours(6)
+  .create();
+
+// Time-based: daily at 9 AM
+ScriptApp.newTrigger('dailyReport')
+  .timeBased()
+  .atHour(9)
+  .everyDays(1)
+  .create();
+
+// Time-based: weekly on Monday at 9 AM
+ScriptApp.newTrigger('weeklySync')
+  .timeBased()
+  .onWeekDay(ScriptApp.WeekDay.MONDAY)
+  .atHour(9)
+  .create();
+
+// Time-based: specific date
+ScriptApp.newTrigger('oneTimeTask')
+  .timeBased()
+  .at(new Date('2026-06-01T10:00:00'))
+  .create();
+
+// Spreadsheet event: on edit
+ScriptApp.newTrigger('onEditHandler')
+  .forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet())
+  .onEdit()
+  .create();
+```
+
+### Delete Triggers
+
+```javascript
+// Delete specific trigger by ID
+function deleteTriggerById(triggerId) {
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getUniqueId() === triggerId) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+}
+
+// Delete all triggers for a function
+function deleteTriggersByFunction(functionName) {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === functionName)
+    .forEach(t => ScriptApp.deleteTrigger(t));
+}
+
+// Delete ALL project triggers (use carefully)
+function deleteAllTriggers() {
+  ScriptApp.getProjectTriggers().forEach(t => ScriptApp.deleteTrigger(t));
+}
+```
+
+### Store Trigger ID for Later Deletion
+
+```javascript
+function createTrackedTrigger() {
+  const trigger = ScriptApp.newTrigger('myFunction')
+    .timeBased()
+    .everyHours(1)
+    .create();
+  
+  // Save ID for later management
+  PropertiesService.getScriptProperties()
+    .setProperty('myTrigger_id', trigger.getUniqueId());
+}
+
+function deleteTrackedTrigger() {
+  const triggerId = PropertiesService.getScriptProperties()
+    .getProperty('myTrigger_id');
+  
+  if (triggerId) {
+    deleteTriggerById(triggerId);
+    PropertiesService.getScriptProperties().deleteProperty('myTrigger_id');
+  }
+}
 ```
 
 ---
 
 ## PropertiesService vs CacheService
 
+### When to Use Each
+
 | Feature | CacheService | PropertiesService |
 |---------|--------------|-------------------|
 | **Max per key** | 100 KB | 9 KB |
+| **Total storage** | ~1,000 items | 500 KB |
 | **Persistence** | Temporary (max 6 hr) | Permanent |
-| **May be evicted** | Yes | No |
-| **Use case** | Temporary caching | Config, state |
+| **May be evicted** | Yes (any time) | No |
+| **Speed** | Faster | Slightly slower |
+| **Use case** | Temporary caching | Config, state, progress |
+
+### CacheService: Temporary Data
+
+```javascript
+const cache = CacheService.getScriptCache();
+
+// Write (expires in 10 minutes by default)
+cache.put('key', JSON.stringify(data));
+
+// Write with custom TTL (max 6 hours = 21600 seconds)
+cache.put('key', JSON.stringify(data), 21600);
+
+// Read (returns null if expired/evicted)
+const cached = cache.get('key');
+if (cached) {
+  const data = JSON.parse(cached);
+}
+
+// Batch operations (more efficient)
+cache.putAll({
+  'key1': JSON.stringify(data1),
+  'key2': JSON.stringify(data2)
+}, 3600);
+
+const results = cache.getAll(['key1', 'key2']);
+```
+
+### PropertiesService: Persistent State
+
+```javascript
+const props = PropertiesService.getScriptProperties();
+
+// Write
+props.setProperty('lastSync', new Date().toISOString());
+props.setProperty('config', JSON.stringify({ enabled: true }));
+
+// Read
+const lastSync = props.getProperty('lastSync');
+const config = JSON.parse(props.getProperty('config') || '{}');
+
+// Delete
+props.deleteProperty('lastSync');
+
+// Get all
+const allProps = props.getProperties();
+```
+
+### Combined Pattern: Cache with Persistent Fallback
+
+```javascript
+function getCachedOrPersistent(key, fetchFn) {
+  const cache = CacheService.getScriptCache();
+  
+  // Try cache first (fast path)
+  let val = cache.get(key);
+  if (val) return JSON.parse(val);
+  
+  // Try persistent storage (slower but reliable)
+  const props = PropertiesService.getScriptProperties();
+  val = props.getProperty(key);
+  if (val) {
+    cache.put(key, val, 600);  // Re-cache for 10 min
+    return JSON.parse(val);
+  }
+  
+  // Fetch fresh data
+  const data = fetchFn();
+  const json = JSON.stringify(data);
+  
+  cache.put(key, json, 600);
+  props.setProperty(key, json);
+  
+  return data;
+}
+```
+
+### Prevent Race Conditions with LockService
+
+```javascript
+function updateSharedState(key, updateFn) {
+  const lock = LockService.getScriptLock();
+  
+  try {
+    lock.waitLock(10000);  // Wait up to 10 seconds
+    
+    const props = PropertiesService.getScriptProperties();
+    const current = JSON.parse(props.getProperty(key) || '{}');
+    const updated = updateFn(current);
+    props.setProperty(key, JSON.stringify(updated));
+    
+    return updated;
+  } finally {
+    lock.releaseLock();
+  }
+}
+```
 
 ---
 
 ## Web App as REST API
 
+### JSON API Endpoint Pattern
+
 ```javascript
 function doGet(e) {
   const action = e.parameter.action;
   
-  let result;
-  switch (action) {
-    case 'getData':
-      result = { status: 'success', data: getData() };
-      break;
-    default:
-      result = { status: 'error', message: 'Unknown action' };
+  try {
+    let result;
+    
+    switch (action) {
+      case 'getData':
+        result = { status: 'success', data: getData() };
+        break;
+      case 'getFilters':
+        result = { status: 'success', filters: getFilterOptions() };
+        break;
+      default:
+        result = { status: 'error', message: 'Unknown action' };
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify(result))
+      .setMimeType(ContentService.MimeType.JSON);
+      
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'error',
+      message: error.message
+    })).setMimeType(ContentService.MimeType.JSON);
   }
-  
-  return ContentService.createTextOutput(JSON.stringify(result))
-    .setMimeType(ContentService.MimeType.JSON);
 }
 
 function doPost(e) {
-  const payload = JSON.parse(e.postData.contents);
-  // Process payload...
-  return ContentService.createTextOutput(JSON.stringify({ status: 'success' }))
-    .setMimeType(ContentService.MimeType.JSON);
+  try {
+    const payload = JSON.parse(e.postData.contents);
+    const action = payload.action;
+    
+    let result;
+    
+    switch (action) {
+      case 'saveData':
+        result = saveData(payload.data);
+        break;
+      default:
+        result = { status: 'error', message: 'Unknown action' };
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify(result))
+      .setMimeType(ContentService.MimeType.JSON);
+      
+  } catch (error) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: 'error',
+      message: error.message
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
 }
 ```
 
-**Note**: Apps Script returns 302 redirects. Clients must follow redirects.
+### Event Parameter Structure
+
+```javascript
+function doGet(e) {
+  // e.queryString: "action=getData&id=123"
+  // e.parameter: { action: "getData", id: "123" }  // First value only
+  // e.parameters: { action: ["getData"], id: ["123"] }  // All values as arrays
+  // e.pathInfo: URL path after /exec (e.g., "users/123")
+}
+
+function doPost(e) {
+  // e.postData.contents: Raw body string
+  // e.postData.type: MIME type (e.g., "application/json")
+  // e.contentLength: Body length in bytes
+}
+```
+
+### IMPORTANT: Redirect Behavior
+
+Apps Script web apps return **302 redirects**. Clients must follow redirects:
+
+```javascript
+// JavaScript fetch
+fetch(webAppUrl + '?action=getData', {
+  method: 'GET',
+  redirect: 'follow'  // Default, but be explicit
+});
+
+// Python requests
+import requests
+response = requests.get(web_app_url, params={'action': 'getData'}, allow_redirects=True)
+```
 
 ---
 
@@ -1225,8 +1866,12 @@ function doPost(e) {
 
 - [templates/Code.gs](templates/Code.gs) - Server-side template
 - [templates/DashboardUI.html](templates/DashboardUI.html) - Client-side template
+- [reference/patterns.md](reference/patterns.md) - Common code patterns
 
 ## Related
 
 - `apps-script-visualizations` skill - Adding charts
-- `google-sheets-management` skill - Uploading data to sheets
+- `apps-script-safety` rule - Deployment safety
+- `apps-script-limits` rule - Quotas and performance
+- `frontend-debugging-workflow` rule - Check console first
+- `type-coercion-google-sheets` rule - Always parseFloat()
