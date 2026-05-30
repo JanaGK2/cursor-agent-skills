@@ -10,6 +10,120 @@ description: Add interactive charts to Apps Script dashboards. Covers Google Cha
 - Adding charts to Apps Script dashboard
 - Need to choose between visualization libraries
 - Implementing specific chart types (radar, heatmap, sankey, etc.)
+- Selecting the right chart for your data structure
+
+---
+
+## Visualization Theory: Why Chart Choice Matters
+
+A chart is a **model of reality** — it abstracts and simplifies data to make it intelligible. The designer's challenge is to abstract without sacrificing integrity. Understanding human visual perception ensures your charts communicate accurately.
+
+### The Perceptual Hierarchy (Cleveland-McGill)
+
+Human vision decodes visual encodings with varying accuracy. This hierarchy ranks perceptual tasks from most to least accurate:
+
+| Rank | Quantitative Data | Ordinal Data | Nominal Data |
+|------|-------------------|--------------|--------------|
+| 1 (Best) | Position on common scale | Position on common scale | Position on common scale |
+| 2 | Positions on nonaligned scales | Density/Shading | Color Hue |
+| 3 | Length, direction, angle | Color Saturation | Texture |
+| 4 | Area | Color Hue | Connection |
+| 5 | Volume, curvature | Texture | Containment |
+| 6 (Worst) | Shading, color saturation | Shape | Volume |
+
+**Key insight**: Position-based encodings (bar charts, dot plots, line graphs) are most accurate. Area and color-based encodings (pie charts, bubble charts, choropleth maps) are least accurate.
+
+### Stevens' Power Law: Why Pie Charts Deceive
+
+The perceived magnitude of visual stimuli follows: `perceived = k × actual^α`
+
+| Encoding | α (exponent) | Effect |
+|----------|--------------|--------|
+| Length | 1.0 | Unbiased (linear) |
+| Area | ~0.7 | Systematic underestimation |
+| Volume | ~0.5 | Severe underestimation |
+
+This explains why:
+- **Bubble charts** are prone to misinterpretation (area judgment)
+- **Pie charts** are inaccurate (angle + curvature judgment)
+- **Bar charts** are most reliable (length judgment)
+
+### Cairo's Five Qualities of Great Visualizations
+
+| Quality | Definition | Violation Example |
+|---------|------------|-------------------|
+| **Truthful** | No self-deception or data distortion | Truncated y-axis, misleading aggregation |
+| **Functional** | Form follows function; enables the cognitive task | Chart can't be read accurately |
+| **Beautiful** | Elegant simplicity that attracts attention | 3D effects, chartjunk, visual noise |
+| **Insightful** | Exposes patterns hidden in tables | Merely replicating tabular data |
+| **Enlightening** | Alters the viewer's mental model | Fails to address key questions |
+
+---
+
+## Chart Selection Decision Logic
+
+Analyze your data to select the optimal chart:
+
+- **D** = Dimension count (categorical columns)
+- **M** = Metric count (quantitative columns)
+- **C** = Cardinality (unique values in a category)
+- **T** = Temporal marker (date/time present?)
+
+```
+IF T == True (Temporal Dimension):
+  IF M == 1 AND C <= 12:
+    → Column Chart (baseline at 0)
+  ELSE:
+    → Line Chart (max 6 lines, direct labeling)
+    → If >6 series: Small Multiples Grid
+
+ELSE IF M >= 2 AND D == 0 (Correlation):
+  IF M == 2:
+    → Scatter Plot with quadrant highlights
+  IF M == 3:
+    → Bubble Chart (map to AREA, not diameter)
+
+ELSE IF D == 1 AND M == 1 (Category Comparison):
+  IF C <= 15 AND labels are short:
+    → Vertical Column Chart (sorted descending)
+  ELSE:
+    → Horizontal Bar Chart (sorted descending)
+
+ELSE IF D == 2 AND M == 1 (Subcategory Comparison):
+  IF parent_categories × child_categories <= 8:
+    → Clustered Bar Chart
+  ELSE:
+    → Dot Plot with Grouping
+```
+
+---
+
+## Design Standards (Emery-Evergreen Checklist)
+
+### Structural Lines
+- **Borders**: Remove chart borders entirely
+- **Gridlines**: Mute to faint gray OR remove if data points are labeled
+- **Dual Y-Axes**: PROHIBITED (suggests false correlations)
+- **Tick marks**: Omit unless tracking precise intervals
+
+### Geometric Proportions
+- **Bar/Column baseline**: MUST start at exactly 0
+- **Bar width**: Approximately 2× the gap between bars
+- **Sorting**: Nominal → descending by value; Ordinal → natural order
+
+### Text & Labels
+- **Titles**: Action-oriented ("Sales Dropped 15% After Q2") not generic ("Sales Over Time")
+- **Text direction**: Always horizontal (rotate chart, not labels)
+- **Direct labeling**: Label data series on the chart, not in a separate legend
+
+### Color Strategy
+- **Action color**: Use ONE distinct color to highlight key insight
+- **Supporting data**: Muted gray for comparison/context data
+- **Accessibility**: Must work in grayscale; avoid red-green adjacent
+- **Sequential palettes**: For continuous ranges
+- **Diverging palettes**: For deviation from midpoint
+
+---
 
 ## Library Selection Guide
 
@@ -98,6 +212,7 @@ function initChart() {
   
   chartOptions = {
     title: 'My Chart',
+    // Don't set fixed width - let container control it
     height: 400,
     legend: { position: 'bottom' }
   };
@@ -119,26 +234,28 @@ window.addEventListener('resize', function() {
 </script>
 ```
 
-### Clear Chart Before Redraw
+### Clear Chart Before Redraw (Fixes Shrink Issues)
 
 If charts fail to shrink when window gets smaller:
 
 ```javascript
 function drawChart() {
-  chart.clearChart();
+  chart.clearChart();  // Clear before redraw
   chart.draw(chartData, chartOptions);
 }
 ```
 
 ### Chart.js Responsive Mode
 
+Chart.js has built-in responsive support:
+
 ```javascript
 new Chart(ctx, {
   type: 'bar',
   data: {...},
   options: {
-    responsive: true,
-    maintainAspectRatio: true
+    responsive: true,           // Enable responsive
+    maintainAspectRatio: true,  // Maintain aspect ratio (optional)
   }
 });
 ```
@@ -146,7 +263,33 @@ new Chart(ctx, {
 ### Plotly Responsive Mode
 
 ```javascript
-Plotly.newPlot('chart', data, layout, { responsive: true });
+Plotly.newPlot('chart', data, layout, {
+  responsive: true  // Built-in responsive support
+});
+```
+
+### ApexCharts Responsive Breakpoints
+
+```javascript
+var options = {
+  chart: {
+    type: 'bar',
+    height: 350
+  },
+  responsive: [{
+    breakpoint: 768,
+    options: {
+      chart: { height: 300 },
+      legend: { position: 'bottom' }
+    }
+  }, {
+    breakpoint: 480,
+    options: {
+      chart: { height: 250 },
+      legend: { show: false }
+    }
+  }]
+};
 ```
 
 ---
@@ -555,37 +698,34 @@ function toggleExpand(btn, id) {
 
 ## Chart Type Reference
 
-### Bar/Column Charts → Google Charts or ApexCharts
+| Chart | Use Case | Data Structure | Best Practices | Cognitive Pitfalls |
+|-------|----------|----------------|----------------|-------------------|
+| **Bar/Column** | Compare magnitudes across categories | 1 Nominal + 1 Quantitative | Bar width = 2× gap; horizontal for long labels | Y-axis MUST start at 0; avoid 3D |
+| **Line Chart** | Trends over time | 1 Temporal + 1 Quantitative | Max 6 lines; direct label; faint gridlines | Avoid dual y-axes; no gridlines if labeled |
+| **Scatter Plot** | Correlations between 2 variables | 2 Quantitative | Add trend line or quadrant highlights | Outliers can distort scale |
+| **Bubble Chart** | 3 quantitative variables | 3 Quantitative | Map to AREA, never diameter | Area estimation prone to underestimation (α≈0.7) |
+| **Pie/Donut** | Simple ratios (use sparingly) | 1 Nominal (max 3) + 1 Quant | Only for very simple A vs B ratios | Replace with bar chart for accuracy |
+| **Heatmap** | Matrix patterns, correlations | 2 Nominal + 1 Quantitative | Overlay numeric labels; accessible colors | Color saturation has low perceptual accuracy |
+| **Radar Chart** | Multivariate profiles | 3+ Quantitative + 1 Nominal | Identical scales; high transparency; max 5 axes | Radial comparison is harder than Cartesian |
+| **Treemap** | Nested hierarchical part-to-whole | Nested Nominal + 1 Quant | High-contrast borders; max 2-3 nesting levels | Non-adjacent rectangles hard to compare |
+| **Sankey** | Flow/path relationships | Source → Target + Weight | Gradient colors for links | Flows can become tangled with high cardinality |
+| **Word Cloud** | Qualitative frequency overview | Text → Frequency | Filter stop-words; use as hook not analysis | Longer words appear larger; context stripped |
+| **Network** | Node relationships, clusters | Adjacency list (Source, Target) | Scale node/link by metrics; directed arrows | Easily becomes unreadable "hairball" |
+| **Stacked Bar** | Part-to-whole over categories | 1 Nominal + 1 Ordinal + 1 Quant | Max 3-4 segments; key category at baseline | Non-baseline segments lack common reference |
+| **Box Plot** | Statistical distributions | 1 Quantitative + optional grouping | Explain whisker meaning (1.5×IQR) | Low statistical literacy in exec audiences |
+| **Histogram** | Continuous distribution | 1 Continuous (binned) | Uniform bin widths; no gaps between bars | Not for categorical data |
+| **Slope Graph** | Change between 2 time points | 1 Nominal + 2 Ordinal + 1 Quant | Color-code increases vs decreases | Fails if intermediate fluctuations matter |
 
-See [charts/bar-charts.md](charts/bar-charts.md)
+### Detailed Templates
 
-### Radar/Spider Charts → Chart.js or ApexCharts
-
-See [charts/radar-charts.md](charts/radar-charts.md)
-
-### Heatmaps → Plotly or ApexCharts
-
-See [charts/heatmaps.md](charts/heatmaps.md)
-
-### Sankey/Flow Diagrams → Google Charts
-
-See [charts/sankey.md](charts/sankey.md)
-
-### Treemaps → Google Charts
-
-See [charts/treemap.md](charts/treemap.md)
-
-### Network Graphs → Cytoscape.js
-
-See [charts/network.md](charts/network.md)
-
-### Word Clouds → D3.js + d3-cloud
-
-See [charts/wordcloud.md](charts/wordcloud.md)
-
-### Quadrant/Scatter → D3.js or Plotly
-
-See [charts/quadrant.md](charts/quadrant.md)
+- [charts/bar-charts.md](charts/bar-charts.md)
+- [charts/radar-charts.md](charts/radar-charts.md)
+- [charts/heatmaps.md](charts/heatmaps.md)
+- [charts/sankey.md](charts/sankey.md)
+- [charts/treemap.md](charts/treemap.md)
+- [charts/network.md](charts/network.md)
+- [charts/wordcloud.md](charts/wordcloud.md)
+- [charts/quadrant.md](charts/quadrant.md)
 
 ## Common Implementations
 
@@ -686,7 +826,62 @@ Full code templates with styling are in the `charts/` folder:
 - [charts/wordcloud.md](charts/wordcloud.md)
 - [charts/quadrant.md](charts/quadrant.md)
 
+---
+
+## Executive Presentation Techniques
+
+When presenting to executives, shift from data display to **visual argument**:
+
+### Action-Oriented Titles
+
+Replace generic headers with takeaways:
+
+| Bad | Good |
+|-----|------|
+| "Sales Over Time" | "Sales Dropped 15% After Supply Chain Disruption" |
+| "Revenue by Region" | "EMEA Outperforms All Regions by 23%" |
+| "Q2 Results" | "Q2 Exceeded Target Despite Market Headwinds" |
+
+### Direct Annotation Layers
+
+Add text callouts directly on the chart canvas:
+
+```
+Y-Axis
+│
+│         *───────── "Fuel price spike triggers
+│        /           margin compression"
+│   *───*
+│  /
+│ *
+└────────────────── X-Axis
+```
+
+### Selective Visual Focus
+
+- **Gray** for supporting/comparison data
+- **Action color** ONLY for the key insight
+- Guides viewer's eye to the argument
+
+### Cognitive Load Reduction
+
+- Prioritize clarity over complexity
+- Remove visual noise (excessive borders, gridlines, legends)
+- Natural flow: high-level summary → detailed supporting data
+
+---
+
 ## Related
 
 - `apps-script-dashboard` skill - Building the dashboard framework
 - `apps-script-limits` rule - Be aware of execution time limits when rendering charts
+
+---
+
+## References
+
+Theoretical foundations based on:
+- Cleveland & McGill (1984) - Graphical Perception Theory
+- Cairo, Alberto - The Truthful Art
+- Emery & Evergreen - Data Visualization Checklist
+- Mackinlay - Expressiveness and Effectiveness criteria
