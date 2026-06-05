@@ -22,6 +22,8 @@ description: Manage Google Sheets via MCP tools and Python scripts. Expand colum
 
 ### Critical Limitations
 
+See `google-sheets-limits` rule for full details. Key points:
+
 - **MCP cannot expand grid** → Use `scripts/expand_sheet.py` first
 - **MCP payload limit ~100 rows** → Use `scripts/fast_upload.py` for large data
 
@@ -40,7 +42,7 @@ python ~/.cursor/skills/google-sheets-management/scripts/fast_upload.py
 
 **Note:** If you encounter cryptography library errors, use a virtual environment:
 ```bash
-python3 -m venv .venv
+/opt/homebrew/bin/python3 -m venv .venv
 source .venv/bin/activate
 pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 ```
@@ -48,7 +50,7 @@ pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
 **Features:**
 - Uploads 5000+ rows per API call
 - Auto-expands sheet grid if needed
-- OAuth2 authentication
+- OAuth2 authentication (reuses newsletter credentials)
 - Handles multiple sheets in one run
 
 **Configuration (edit the script):**
@@ -65,7 +67,7 @@ UPLOADS = [
 ### Step 1: Get Sheet ID (numeric)
 
 ```bash
-python scripts/expand_sheet.py \
+python ~/.cursor/skills/google-sheets-management/scripts/expand_sheet.py \
   --spreadsheet-id "1abc..." \
   --list-sheets
 ```
@@ -74,13 +76,13 @@ python scripts/expand_sheet.py \
 
 ```bash
 # Add 5 columns to sheet with numeric ID 123456789
-python scripts/expand_sheet.py \
+python ~/.cursor/skills/google-sheets-management/scripts/expand_sheet.py \
   --spreadsheet-id "1abc..." \
   --sheet-id 123456789 \
   --add-columns 5
 
 # Add 100 rows
-python scripts/expand_sheet.py \
+python ~/.cursor/skills/google-sheets-management/scripts/expand_sheet.py \
   --spreadsheet-id "1abc..." \
   --sheet-id 123456789 \
   --add-rows 100
@@ -203,9 +205,9 @@ def clear_sheet(service, spreadsheet_id, sheet_name, keep_header=False):
 
 ### Bulk Data Push with Source Record ID Matching
 
-1. Load lookup data from CSV (e.g., `master_data.csv`)
+1. Load lookup data from CSV (e.g., `master_plans.csv`)
 2. Read existing sheet data via MCP `get_sheet_data`
-3. Find `Source_Record_ID` or `ID` column
+3. Find `Source_Record_ID` or `Source Record Id` column
 4. Build update ranges matching IDs to row positions
 5. Use `batch_update_cells` to write (max ~500 ranges per call)
 
@@ -384,14 +386,10 @@ def main():
 
 ## Authentication
 
-### OAuth (User Tokens)
+Scripts use OAuth token from: `/Users/jchvalko/myagents/newsletters/token.json`
 
-For user-facing applications or personal scripts:
-
+If token expires, run any newsletter script to refresh, or manually refresh:
 ```python
-TOKEN_FILE = './token.json'  # Or use environment variable
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
@@ -399,43 +397,6 @@ creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 if creds.expired:
     creds.refresh(Request())
 ```
-
-### Service Account (For Bots/Automation)
-
-For unattended scripts, CI/CD, or server-to-server communication:
-
-1. Create service account in Google Cloud Console (IAM & Admin → Service Accounts)
-2. Download JSON key file
-3. **CRITICAL**: Share spreadsheet with the `client_email` from the JSON file
-
-```python
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-
-SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
-creds = Credentials.from_service_account_file(
-    'service-account-key.json', 
-    scopes=SCOPES
-)
-service = build('sheets', 'v4', credentials=creds)
-```
-
-### Using gspread Library (Simpler API)
-
-```bash
-pip install gspread
-```
-
-```python
-import gspread
-
-gc = gspread.service_account(filename='service-account-key.json')
-sh = gc.open("My Spreadsheet")
-data = sh.sheet1.get_all_records()
-```
-
----
 
 ## API Quotas and Rate Limiting
 
@@ -449,8 +410,13 @@ data = sh.sheet1.get_all_records()
 | Write requests per minute (per user) | 60 |
 | Request processing timeout | 180 seconds |
 | Payload size recommendation | 2 MB max |
+| Requests per day | Unlimited |
+
+**Note:** Each batch request counts as ONE API request, regardless of subrequests.
 
 ### Exponential Backoff Pattern
+
+When you receive a 429 (Too Many Requests) error, implement exponential backoff:
 
 ```python
 import time
@@ -458,24 +424,141 @@ import random
 from googleapiclient.errors import HttpError
 
 def api_call_with_backoff(func, max_retries=5):
+    """Execute API call with exponential backoff for rate limits."""
     for attempt in range(max_retries):
         try:
             return func()
         except HttpError as e:
             if e.resp.status == 429:
                 wait = (2 ** attempt) + random.uniform(0, 1)
-                print(f"Rate limited. Waiting {wait:.1f}s...")
+                print(f"Rate limited. Waiting {wait:.1f}s before retry...")
                 time.sleep(wait)
             else:
                 raise
-    raise Exception("Max retries exceeded")
+    raise Exception(f"Max retries ({max_retries}) exceeded")
+
+# Usage
+result = api_call_with_backoff(
+    lambda: service.spreadsheets().values().get(
+        spreadsheetId=SPREADSHEET_ID,
+        range='Sheet1!A1:Z1000'
+    ).execute()
+)
 ```
 
-### Requesting Quota Increases
+### Request Counting and Throttling
 
-1. Go to Google Cloud Console → IAM & Admin → Quotas
-2. Filter for "Sheets API"
-3. Request increase with business justification
+For high-volume operations, track and throttle requests:
+
+```python
+import time
+
+class RateLimiter:
+    def __init__(self, requests_per_minute=55):  # Stay under 60 limit
+        self.rpm = requests_per_minute
+        self.requests = []
+    
+    def wait_if_needed(self):
+        now = time.time()
+        # Remove requests older than 1 minute
+        self.requests = [t for t in self.requests if now - t < 60]
+        
+        if len(self.requests) >= self.rpm:
+            sleep_time = 60 - (now - self.requests[0])
+            if sleep_time > 0:
+                print(f"Rate limit approaching. Sleeping {sleep_time:.1f}s...")
+                time.sleep(sleep_time)
+        
+        self.requests.append(time.time())
+
+limiter = RateLimiter()
+
+for item in large_dataset:
+    limiter.wait_if_needed()
+    # Make API call
+```
+
+---
+
+## Service Account Authentication (For Bots/Automation)
+
+### When to Use Service Accounts vs OAuth
+
+| Use Case | Authentication Type |
+|----------|---------------------|
+| User-facing app | OAuth (user consent) |
+| Unattended scripts (cron, CI/CD) | Service Account |
+| Server-to-server | Service Account |
+| Personal scripts with user interaction | OAuth |
+
+### Setup Steps
+
+1. **Create service account** in Google Cloud Console:
+   - Go to **IAM & Admin → Service Accounts**
+   - Click **Create Service Account**
+   - Grant **Editor** role
+   - Click **Manage Keys → Add Key → JSON**
+   - Download the JSON key file
+
+2. **CRITICAL: Share spreadsheet with service account**:
+   - Open the JSON key file
+   - Find the `client_email` value (looks like `name@project.iam.gserviceaccount.com`)
+   - Share your spreadsheet with this email (Editor access)
+
+3. **Use in Python**:
+
+```python
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+SERVICE_ACCOUNT_FILE = 'service-account-key.json'
+
+creds = Credentials.from_service_account_file(
+    SERVICE_ACCOUNT_FILE, 
+    scopes=SCOPES
+)
+service = build('sheets', 'v4', credentials=creds)
+
+# Now use service as normal
+result = service.spreadsheets().values().get(
+    spreadsheetId='your-spreadsheet-id',
+    range='Sheet1!A1:Z100'
+).execute()
+```
+
+### Using gspread Library (Simpler API)
+
+```bash
+pip install gspread
+```
+
+```python
+import gspread
+
+# Authenticate with service account
+gc = gspread.service_account(filename='service-account-key.json')
+
+# Open spreadsheet by name or URL
+sh = gc.open("My Spreadsheet")
+# Or: sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/...")
+
+# Read data
+data = sh.sheet1.get_all_records()  # Returns list of dicts
+
+# Write data
+sh.sheet1.update('A1', [['Header1', 'Header2'], ['Value1', 'Value2']])
+
+# Append row
+sh.sheet1.append_row(['New', 'Row', 'Data'])
+```
+
+### Security Best Practices
+
+- **Never commit** JSON key files to git (add to `.gitignore`)
+- Use environment variables for key paths in production
+- Rotate keys periodically
+- Grant minimum required permissions
 
 ---
 
@@ -483,25 +566,42 @@ def api_call_with_backoff(func, max_retries=5):
 
 ### Requirements
 
-- Google Workspace Business/Enterprise OR Google AI Premium subscription
-- Desktop browser only
+- Google Workspace Business/Enterprise **OR** Google AI Premium subscription
+- Desktop browser only (mobile not supported)
+- Native Google Sheets files (not .xlsx)
 
-### =AI() Function
+### =AI() and =Gemini() Functions
+
+Use directly in cells for AI-powered text operations:
 
 ```
 =AI("Summarize this text", A1)
-=AI("Categorize: Electronics, Clothing, Food", B2)
+=AI("Categorize this product into: Electronics, Clothing, Food", B2)
 =AI("Translate to Spanish", C1)
+=AI("Extract the company name from this text", D1)
+=AI("Sentiment analysis: positive, negative, or neutral", E1:E100)
 ```
 
-**Limitations:**
-- Text output only
-- Cell-level operation (cannot see entire spreadsheet)
-- Cannot use embedded functions
+### Limitations
+
+| Limitation | Details |
+|------------|---------|
+| Output type | Text only (no charts, tables, or formatting) |
+| Scope | Cell-level operation (cannot see entire spreadsheet) |
+| Embedded functions | Cannot use =AI() inside other functions |
+| Context | Only sees cells explicitly referenced |
+| Rate | Subject to Gemini API quotas |
 
 ### Gemini Side Panel
 
-Access via sparkle icon (✨). Can build spreadsheets, create charts, generate formulas, and run multi-step analysis.
+Access via the **sparkle icon** (✨) in the top-right corner. Capabilities:
+
+- **Build spreadsheets from scratch**: "Create a project tracker with task, assignee, deadline, status"
+- **Create pivot tables and charts**: "Visualize this sales data as a bar chart"
+- **Apply conditional formatting**: "Highlight cells above $10,000 in green"
+- **Generate formulas**: "Create a formula to calculate commission at 5%"
+- **Multi-step analysis**: "Run a full analysis on this dataset"
+- **Optimization problems**: "Optimize staff scheduling given these constraints"
 
 ---
 
@@ -509,24 +609,64 @@ Access via sparkle icon (✨). Can build spreadsheets, create charts, generate f
 
 ### HTTP Status Codes
 
-| Code | Meaning | Action |
-|------|---------|--------|
-| 400 | Bad Request | Check request format |
-| 429 | Too Many Requests | Implement backoff |
-| 500 | Internal Server Error | Retry or file bug |
-| 503 | Service Unavailable | Reduce complexity, retry |
+| Code | Meaning | Cause | Action |
+|------|---------|-------|--------|
+| 400 | Bad Request | Malformed request | Check request format, validate parameters |
+| 401 | Unauthorized | Invalid/expired credentials | Refresh OAuth token or check service account |
+| 403 | Forbidden | No permission | Share sheet with account, check scopes |
+| 404 | Not Found | Sheet/range doesn't exist | Verify spreadsheet ID and sheet name |
+| 429 | Too Many Requests | Rate limit exceeded | Implement exponential backoff |
+| 500 | Internal Server Error | Google-side issue | Retry with backoff, file bug report |
+| 503 | Service Unavailable | High complexity or load | Reduce complexity, retry |
 
-### 503 Troubleshooting
+### 503 Error Troubleshooting
 
-- Use batchUpdate instead of multiple calls
-- Limit concurrent requests to 1/sec/spreadsheet
-- Use field masks to reduce response size
+503 errors are commonly caused by complex requests or spreadsheets:
+
+**Request-side fixes:**
+- Use `batchUpdate` to combine operations (reduces overhead)
+- Limit concurrent requests to **1 per second per spreadsheet**
+- Use **field masks** to retrieve only needed data
+- Implement exponential backoff
+
+**Spreadsheet-side fixes:**
+- Limit use of `IMPORTRANGE`, `QUERY`, and complex formulas
 - Split large spreadsheets into multiple files
-- Limit IMPORTRANGE and complex formulas
+- Rotate to new spreadsheet periodically (reduces version history)
+- Limit spreadsheet sharing to necessary users only
+
+### Timeout Handling
+
+API requests timeout after **180 seconds**. For large operations:
+
+```python
+def chunked_upload(service, spreadsheet_id, sheet_name, data, chunk_size=5000):
+    """Upload large datasets in chunks to avoid timeouts."""
+    total = len(data)
+    
+    for i in range(0, total, chunk_size):
+        chunk = data[i:i + chunk_size]
+        start_row = i + 1
+        
+        service.spreadsheets().values().update(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{sheet_name}'!A{start_row}",
+            valueInputOption='RAW',
+            body={'values': chunk}
+        ).execute()
+        
+        print(f"Uploaded rows {start_row}-{min(i + chunk_size, total)}")
+```
 
 ### Field Masks (Reduce Response Size)
 
+Request only the fields you need:
+
 ```python
+# Instead of getting everything
+result = service.spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+
+# Request only specific fields
 result = service.spreadsheets().get(
     spreadsheetId=SPREADSHEET_ID,
     fields='sheets.properties.title,sheets.properties.sheetId'
@@ -629,7 +769,7 @@ from googleapiclient.discovery import build
 # CONFIGURATION - Edit these values
 # ============================================================
 SPREADSHEET_ID = 'your-spreadsheet-id-here'
-TOKEN_FILE = './token.json'  # OAuth token file
+TOKEN_FILE = '/path/to/token.json'  # OAuth token file
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
 # CSV files to upload: (csv_path, sheet_name)
@@ -745,7 +885,65 @@ if __name__ == '__main__':
 
 ---
 
+## Google Sheet as Pipeline Registry (gspread)
+
+Use when: a pipeline generates or tracks external resources and needs a persistent, human-readable metadata store (Drive file IDs, notebook assignments, content hashes, processing status).
+
+**Install:** `pip install gspread`
+
+**Pattern: One row per entity, upsert by primary key**
+
+```python
+import gspread
+from google.oauth2.credentials import Credentials
+
+COLUMNS = ["id", "name", "status", "output_url", "content_hash", "last_processed"]
+
+class Registry:
+    def __init__(self, creds: Credentials, sheet_id: str):
+        gc = gspread.authorize(creds)
+        self._sheet = gc.open_by_key(sheet_id).sheet1
+        records = self._sheet.get_all_records()
+        self._data = {r["id"]: r for r in records if r.get("id")}
+
+    def get(self, entity_id: str) -> dict | None:
+        return self._data.get(entity_id)
+
+    def upsert(self, row: dict):
+        """Insert new row or update existing row by primary key (column 'id')."""
+        eid = row["id"]
+        if eid in self._data:
+            existing = {**self._data[eid], **{k: v for k, v in row.items() if v != ""}}
+            cell = self._sheet.find(eid, in_column=1)
+            self._sheet.update(f"A{cell.row}", [[existing.get(c, "") for c in COLUMNS]])
+            self._data[eid] = existing
+        else:
+            self._sheet.append_row([row.get(c, "") for c in COLUMNS])
+            self._data[eid] = row
+```
+
+**Registry design principles:**
+- Freeze the header row on creation: `sheet.freeze(rows=1)`
+- Write after EACH processed entity (not in batch) — allows crash recovery on re-run
+- Include a `status` column: `pending → processing → done | error`
+- Include a `content_hash` column for idempotent re-runs
+- Include a `last_processed` ISO timestamp for debugging and incremental logic
+
+**Creating the registry sheet (one-time):**
+```python
+gc = gspread.authorize(creds)
+sh = gc.create("My Pipeline Registry")
+sh.sheet1.append_row(COLUMNS)
+sh.sheet1.freeze(rows=1)
+print(f"Sheet ID: {sh.id}")  # paste into config
+```
+
+**Rate limits:** gspread write calls count against Google Sheets API quota (300 writes/minute). For high-volume pipelines, batch updates or add a `time.sleep(0.2)` between upserts.
+
+---
+
 ## Related Files
 
 - Fast bulk upload: [scripts/fast_upload.py](scripts/fast_upload.py) - Direct API for large datasets
 - Grid expansion: [scripts/expand_sheet.py](scripts/expand_sheet.py) - Expand rows/columns
+- API reference: [reference/google-sheets-api.md](reference/google-sheets-api.md)
