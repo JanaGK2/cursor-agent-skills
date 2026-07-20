@@ -101,12 +101,94 @@ Key components:
 
 See `apps-script-visualizations` skill for chart integration.
 
-### 6. Deploy
+### 6. Configure appsscript.json Manifest (CRITICAL for Web Apps)
+
+**When deploying as a web app that accesses spreadsheets by ID**, you MUST configure OAuth scopes in the manifest. Without this, you'll get:
+
+```
+Error: You do not have permission to call SpreadsheetApp.openById
+```
+
+**Steps:**
+1. In Apps Script editor, click **gear icon** (Project Settings)
+2. Check: "Show 'appsscript.json' manifest file in editor"
+3. Click `appsscript.json` in file list and add scopes:
+
+```json
+{
+  "timeZone": "America/New_York",
+  "dependencies": {},
+  "exceptionLogging": "STACKDRIVER",
+  "runtimeVersion": "V8",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/script.container.ui",
+    "https://www.googleapis.com/auth/userinfo.email"
+  ],
+  "webapp": {
+    "executeAs": "USER_DEPLOYING",
+    "access": "ANYONE"
+  }
+}
+```
+
+**When is this required?**
+- Spreadsheet created programmatically (MCP, API, Python script)
+- Script added to sheet after creation (not via Extensions > Apps Script in that sheet)
+- Using `SpreadsheetApp.openById()` instead of `getActiveSpreadsheet()`
+- Deploying as standalone web app (not container-bound)
+
+**When is this NOT required?**
+- Script created via Extensions > Apps Script from within the target sheet
+- Container-bound scripts accessing only their parent spreadsheet
+
+### 7. Deploy workflow — ask first, then recommend
+
+**Before scaffolding a new Apps Script web app (or establishing a local copy), ask the user:**
+
+> Do you want a **clasp** local project (repo folder ↔ Google sync), or **browser-only** in script.google.com?
+
+Give an **opinionated recommendation** based on deployment type, then follow their choice.
+
+| Situation | Recommend | Why |
+|-----------|-----------|-----|
+| Shared web app (`/exec`), will iterate, lives in a git repo | **clasp** | Local edit in Cursor, `clasp push`, then `clasp deploy -i <id>` for versioned updates |
+| Production / team dashboard with versioned deployments | **clasp** | Redeploys are repeatable from the terminal; code stays reviewable |
+| One-off throwaway, tiny experiment, or user refuses local setup | **Browser-only** | Faster; no Node/clasp setup |
+| Container-bound script only (Extensions → Apps Script on a sheet), no standalone web app | **Browser-only** (or clasp only if they want git) | Often never leaves the sheet editor |
+
+#### Head (`/dev`) vs versioned (`/exec`)
+
+| | Test (Head) | Production |
+|--|-------------|------------|
+| URL | ends in `/dev` | ends in `/exec` |
+| Updates | latest saved code | needs new version / `clasp deploy` |
+| Who can open | script **editors** only | per deployment access settings |
+
+Never share `/dev` as the team link. Shared dashboards use versioned `/exec` + redeploy after code changes.
+
+#### If user chooses clasp
+
+Prerequisite: Node.js + `@google/clasp` (`npm i -g @google/clasp`), then `clasp login` once.
+
+1. Create a local folder in the repo (e.g. `webapp/` or `dashboards/<name>/`).
+2. Add `appsscript.json` (manifest with required OAuth scopes — see §6).
+3. Add `.gs` / `.html` sources in that folder.
+4. Link to Google:
+   - New project: `clasp create --type webapp --title "…" --rootDir .`
+   - Existing project: `clasp clone <scriptId>` or write `.clasp.json` with `scriptId` + `rootDir`.
+5. Sync: `clasp push` (upload) / `clasp pull` (download).
+6. First shareable URL: Deploy → New deployment → Web app (or `clasp deploy`), copy the `/exec` URL.
+7. Later updates to the **same** URL: `clasp push` then `clasp deploy -i <DEPLOYMENT_ID> -d "note"`.
+
+#### If user chooses browser-only
 
 1. Deploy → New deployment → Web app
-2. Execute as: User accessing the web app
-3. Who has access: Anyone within [domain] (or Anyone if using email whitelisting)
-4. Copy URL
+2. Execute as: Me (user deploying)
+3. Who has access: Anyone (if using email whitelisting in code)
+4. Copy the `/exec` URL
+5. **Re-authorize when prompted** — Google will ask for spreadsheet access
+6. Later code changes still need Manage deployments → Edit → New version (Head `/dev` is not a shared production link)
 
 ## Email Whitelisting (Access Control)
 
@@ -114,6 +196,17 @@ Instead of managing access through Google's deployment settings (which requires 
 - Deploy once with broad access ("Anyone" or "Anyone with Google account")
 - Control who can access via code or a Whitelist sheet
 - No redeployment needed when access changes
+
+### CRITICAL: userinfo.email Scope Required
+
+**If you see `email: unknown` or empty email in access denied messages**, the script is missing the `userinfo.email` OAuth scope.
+
+When using whitelisting with "Execute as: Me" deployment:
+- The script runs with the deployer's credentials (can access spreadsheet)
+- `Session.getActiveUser().getEmail()` returns the **visitor's** email (not deployer's)
+- But ONLY if `https://www.googleapis.com/auth/userinfo.email` is declared in `appsscript.json`
+
+Without this scope, email detection fails silently and returns empty/unknown. This scope is already shown in the Step 6 `appsscript.json` example above — do not omit it.
 
 ### CRITICAL: Web App Context
 
@@ -1033,12 +1126,12 @@ function getFilterOptions(column, currentSelections) {
 Define filters as a configuration array for maintainability:
 
 ```javascript
-// Server-side configuration
+// Server-side configuration — use string IDs that match HTML element suffixes
 const FILTERS = [
-  { id: 1, name: 'Geo', column: '_GEO' },
-  { id: 2, name: 'Segment', column: '_SEGMENT' },
-  { id: 3, name: 'Region', column: '_REGION' },
-  { id: 4, name: 'Status', column: '_STATUS' },
+  { id: 'geo',     name: 'Geo',     column: '_GEO' },
+  { id: 'segment', name: 'Segment', column: '_SEGMENT' },
+  { id: 'region',  name: 'Region',  column: '_REGION' },
+  { id: 'status',  name: 'Status',  column: '_STATUS' },
 ];
 
 function getDashboardConfig() {
@@ -1858,6 +1951,303 @@ fetch(webAppUrl + '?action=getData', {
 // Python requests
 import requests
 response = requests.get(web_app_url, params={'action': 'getData'}, allow_redirects=True)
+```
+
+---
+
+---
+
+## ⚠️ Filter ID Alignment — Backend and Frontend Must Match
+
+The `FILTERS` array in `Code.gs` defines which columns to filter on. The `id` field in each filter entry **must exactly match** the suffix of `id="filter-<id>"` in the HTML. A mismatch causes all dynamic filter selects to silently fail — no error, just empty dropdowns.
+
+**Root cause pattern:** backend used numeric IDs (`id: 1, 2, 3…`) while HTML expected string IDs (`id="filter-geo"`, etc.) → `getElementById('filter-1')` returns null silently.
+
+### ✅ Correct pattern
+
+**Code.gs:**
+```javascript
+const FILTERS = [
+  { id: 'geo',      label: 'Geo',         column: '_GEO'              },
+  { id: 'org',      label: 'Org',         column: '_ORG'              },
+  { id: 'role',     label: 'Sales Role',  column: '_SALES_ROLE_SUMM'  },
+  { id: 'top_skew', label: 'Top SG SKEW', column: '_TOP_SG_SKEW_BUCKET' },
+];
+```
+
+**HTML:**
+```html
+<select multiple class="filter-select" id="filter-geo"      onchange="onFilterChange()"></select>
+<select multiple class="filter-select" id="filter-org"      onchange="onFilterChange()"></select>
+<select multiple class="filter-select" id="filter-role"     onchange="onFilterChange()"></select>
+<select multiple class="filter-select" id="filter-top_skew" onchange="onFilterChange()"></select>
+```
+
+**JS population function (must be null-safe):**
+```javascript
+function populateFilterOptions(filters, filterValues) {
+  filters.forEach(f => {
+    const el = document.getElementById('filter-' + f.id);
+    if (!el) return;  // CRITICAL: skip gracefully if element not found
+    // ... populate options
+  });
+}
+```
+
+### Recommendation: hardcode filter elements in HTML
+
+For complex layouts (specific order, mixed search inputs and selects), define all filter elements explicitly in HTML rather than generating them from a JS array. The backend `FILTERS` array then only provides column metadata — not element creation.
+
+---
+
+## ⚠️ Expand/Collapse in Dynamically Rendered Tables
+
+**Always use event delegation + `<span>` — never attach listeners to dynamic elements directly.**
+
+This pattern fails silently in three ways:
+1. Inline `onclick` on `<button>` inside dynamically replaced HTML → lost after `innerHTML` replacement
+2. `addEventListener` attached after `innerHTML` set → worked once, then lost on next render
+3. `<button>` element inside a table cell → browsers sometimes intercept click bubbling
+
+All three produce "click does nothing" with no console error.
+
+### ❌ What breaks
+
+```html
+<!-- WRONG: button may intercept clicks; onclick lost on re-render -->
+<button onclick="toggleOther('${id}')">Show more ▶</button>
+```
+
+```javascript
+// WRONG: listener attached to element that gets replaced
+table.innerHTML = html;
+table.querySelectorAll('.other-btn').forEach(btn =>
+  btn.addEventListener('click', toggleOther)
+);
+```
+
+### ✅ Correct pattern
+
+**Step 1 — Render the expander as a `<span>` with a data attribute:**
+
+```javascript
+function renderOtherCell(empId, otherData) {
+  return `<span class="other-summary" data-emp="${empId}" style="cursor:pointer;">
+    ▶ ${otherData.count} more SGs (avg ${otherData.avg})
+  </span>`;
+}
+```
+
+**Step 2 — Attach ONE delegated listener on `document` (run ONCE at startup, not on each render):**
+
+```javascript
+document.addEventListener('click', function(e) {
+  const trigger = e.target.closest('.other-summary');
+  if (!trigger) return;
+  const empId = trigger.dataset.emp;
+  toggleOtherExpand(empId, trigger);
+});
+```
+
+**Step 3 — The toggle function finds or creates the expansion row:**
+
+```javascript
+function toggleOtherExpand(empId, trigger) {
+  const existing = document.getElementById('other-expand-' + empId);
+  if (existing) {
+    existing.remove();
+    trigger.textContent = trigger.textContent.replace('▼', '▶');
+    return;
+  }
+  const tr = trigger.closest('tr');
+  const expandRow = document.createElement('tr');
+  expandRow.id = 'other-expand-' + empId;
+  expandRow.innerHTML = `<td colspan="99">${buildOtherDetail(empId)}</td>`;
+  tr.after(expandRow);
+  trigger.textContent = trigger.textContent.replace('▶', '▼');
+}
+```
+
+### Also fix: no nested `<tbody>` inside a `<tbody>`
+
+HTML does not allow `<tbody>` inside `<tbody>`. If your render loop creates per-group `<tbody>` elements, insert them directly into the `<table>`, not into an outer `<tbody id="table-body">`:
+
+```javascript
+// WRONG
+document.getElementById('table-body').innerHTML = groups.map(renderGroup).join('');
+
+// CORRECT: insert <tbody> elements directly into <table>
+const table = document.getElementById('assoc-table');
+table.querySelectorAll('tbody').forEach(b => b.remove());
+table.insertAdjacentHTML('beforeend', groups.map(renderGroup).join(''));
+```
+
+Each `renderGroup()` should return a full `<tbody>...</tbody>` string (not just rows).
+
+---
+
+## Multi-Tab Dashboard Pattern
+
+When a dashboard needs multiple independent data views (e.g., different roles, different time periods):
+
+### Frontend: per-tab state object
+
+```javascript
+function makeTabState() {
+  return {
+    allData:      null,   // null = not yet loaded
+    filteredData: [],
+    currentPage:  1,
+    sortCol:      'Name',
+    sortDir:      'asc',
+    // add other UI state as needed
+  };
+}
+
+// One state entry per tab — must match backend tab keys
+const TAB_STATE = {
+  summary: makeTabState(),
+  ae:      makeTabState(),
+  pse:     makeTabState(),
+  asa:     makeTabState(),
+};
+
+let ACTIVE_TAB = 'summary';
+
+// Always read/write current tab's state through S()
+function S() { return TAB_STATE[ACTIVE_TAB]; }
+```
+
+### Frontend: lazy loading
+
+```javascript
+function switchDashTab(name) {
+  ACTIVE_TAB = name;
+  ['summary','ae','pse','asa','readme'].forEach(t => {
+    document.getElementById('nav-' + t)?.classList.toggle('active', t === name);
+  });
+
+  if (name === 'readme') {
+    document.getElementById('dashboard-panel').style.display = 'none';
+    document.getElementById('readme-panel').style.display = 'block';
+    return;
+  }
+  document.getElementById('dashboard-panel').style.display = 'block';
+  document.getElementById('readme-panel').style.display = 'none';
+
+  // Lazy load: only fetch data when tab is first opened
+  if (!S().allData) {
+    loadData(name);  // calls google.script.run.loadAllData(name)
+  } else {
+    applyFilters();  // Tab already loaded — just re-render
+  }
+}
+```
+
+### Backend: per-tab sheet mapping + per-tab cache keys
+
+```javascript
+const TAB_SHEETS = {
+  'summary': 'Aggregated_Summary',
+  'ae':      'Aggregated_AE',
+  'pse':     'Aggregated_PSE',
+  'asa':     'Aggregated_ASA',
+};
+
+function loadAllData(tabName) {
+  const sheetName = TAB_SHEETS[tabName || 'ae'];
+  if (!sheetName) throw new Error('Unknown tab: ' + tabName);
+  const { data } = loadSheetData(sheetName, false);
+  // ... trim to needed columns and return
+}
+
+function loadSheetData(sheetName, forceRefresh) {
+  const cacheKey = `data_${CONFIG.CACHE_VERSION}_${sheetName}`;
+  // ... chunked CacheService read/write using cacheKey
+}
+```
+
+**Key principle:** bump `CACHE_VERSION` every time data is re-uploaded so old cache is invalidated.
+
+### Adding a new role/tab (checklist)
+
+1. Process new CSV: `python scripts/process_sg.py "<csv>" <prefix>`
+2. Add to `TABS_TO_UPLOAD` in push script
+3. Add to `TAB_SHEETS` in `Code.gs`
+4. Add to `tabs` array and `tabLabels` in `getDashboardConfig()`
+5. Add nav `<button>` to HTML
+6. Add to tab-name arrays in `switchDashTab` and `TAB_STATE`
+7. Bump `CACHE_VERSION`
+8. Re-run push script and deploy new Apps Script version
+
+---
+
+## Multi-Role Data Processing: Prefix Pattern
+
+When a dashboard will eventually cover multiple roles, build the processing script to accept a `prefix` argument from day one — one script handles all roles:
+
+```python
+# process_sg.py — accepts (csv_path, prefix)
+import sys
+from pathlib import Path
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python process_sg.py <csv_path> <prefix>")
+        print("  e.g. python scripts/process_sg.py 'csv_sources/AE Jana v2.csv' ae")
+        sys.exit(1)
+
+    csv_path = Path(sys.argv[1])
+    prefix   = sys.argv[2].lower()   # e.g. "ae", "pse", "asa"
+
+    data = process(csv_path)
+    save_outputs(data, prefix)       # → sg_aggregated_ae_data.csv, etc.
+
+def save_outputs(data, prefix):
+    out_dir = Path(__file__).parent
+    out_csv   = out_dir / f'sg_aggregated_{prefix}_data.csv'
+    out_json  = out_dir / f'sg_aggregated_{prefix}_data.json'
+    out_cache = out_dir / f'sg_aggregated_{prefix}_filter_cache.json'
+    # ... write files
+```
+
+**Usage:**
+```bash
+python scripts/process_sg.py "csv_sources/AE Jana v2.csv" ae
+python scripts/process_sg.py "csv_sources/PSE Jana v1.csv" pse
+python scripts/process_sg.py "csv_sources/Acct SA Jana v1.csv" asa
+```
+
+**Combining into a summary tab:**
+```python
+import csv
+from pathlib import Path
+
+scripts = Path('scripts')
+combined = []
+for prefix in ['ae', 'pse', 'asa']:
+    combined += list(csv.DictReader(open(scripts / f'sg_aggregated_{prefix}_data.csv')))
+
+cols = list(csv.DictReader(open(scripts / 'sg_aggregated_ae_data.csv')).fieldnames)
+with open(scripts / 'sg_aggregated_summary_data.csv', 'w', newline='', encoding='utf-8') as f:
+    w = csv.DictWriter(f, fieldnames=cols, extrasaction='ignore')
+    w.writeheader()
+    w.writerows(combined)
+```
+
+**Column name fallback pattern** (handle CSV naming variations across roles):
+```python
+FILTER_COLUMNS = [
+    # (output_col, primary_src_col, fallback_src_col_or_None)
+    ('_DIRECT_OVERLAY', 'Direct / Overlay', 'Direct or Overlay'),  # varies by file
+    ('_HOME_COUNTRY',   'HOME COUNTRY',      'COUNTRY'),            # varies by file
+    ('_ROLE_GROUP',     'SUMMARY_ROLE_PICKLIST', None),
+]
+
+for filter_col, src_col, fallback_col in FILTER_COLUMNS:
+    val = row.get(src_col, '').strip()
+    if (not val or val == '#N/A') and fallback_col:
+        val = row.get(fallback_col, '').strip()
 ```
 
 ---
