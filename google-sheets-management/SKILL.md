@@ -20,6 +20,12 @@ description: Manage Google Sheets via MCP tools and Python scripts. Expand colum
 | `create_sheet` | New tab in spreadsheet | - |
 | `share_spreadsheet` | Set permissions | - |
 
+**Gotcha (empirically confirmed 2026-08-01):** `update_cells`'s actual body parameter is
+`data` (a 2D array), not `values`. Calling it with `values` does not raise an obvious
+"unknown parameter" error in a way that's easy to notice — always check the tool's
+`updatedCells` count in the response to confirm the write actually landed, don't assume
+success from the absence of a thrown error.
+
 ### Critical Limitations
 
 See `google-sheets-limits` rule for full details. Key points:
