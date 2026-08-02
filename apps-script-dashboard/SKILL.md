@@ -127,10 +127,12 @@ Error: You do not have permission to call SpreadsheetApp.openById
   ],
   "webapp": {
     "executeAs": "USER_DEPLOYING",
-    "access": "ANYONE"
+    "access": "DOMAIN"
   }
 }
 ```
+
+> **Note:** `"ANYONE"` may be blocked by org Google Workspace admin policy. For internal org dashboards, prefer `"DOMAIN"` plus app-level email Whitelist / `ALLOWED_EMAILS` (see §7 and Email Whitelisting below).
 
 **When is this required?**
 - Spreadsheet created programmatically (MCP, API, Python script)
@@ -142,13 +144,17 @@ Error: You do not have permission to call SpreadsheetApp.openById
 - Script created via Extensions > Apps Script from within the target sheet
 - Container-bound scripts accessing only their parent spreadsheet
 
-### 7. Deploy workflow — ask first, then recommend
+### 7. Deploy workflow — clasp by default for real dashboards
 
-**Before scaffolding a new Apps Script web app (or establishing a local copy), ask the user:**
+#### Default execution path (mandatory unless user refuses)
 
-> Do you want a **clasp** local project (repo folder ↔ Google sync), or **browser-only** in script.google.com?
+- Do **not** lead with copy-paste browser deploy instructions for real dashboards.
+- Assume **clasp** for real/stakeholder/iterated `/exec` dashboards that live in a git repo.
+- Ask clasp vs browser-only **only** for throwaway experiments or when intent is ambiguous.
+- If clasp setup fails, fall back to browser deploy — do not block the user on clasp.
+- **NEVER** force copy-paste browser deploy as the primary path when clasp is available and the dashboard is non-throwaway.
 
-Give an **opinionated recommendation** based on deployment type, then follow their choice.
+Give an **opinionated recommendation** based on deployment type:
 
 | Situation | Recommend | Why |
 |-----------|-----------|-----|
@@ -167,7 +173,7 @@ Give an **opinionated recommendation** based on deployment type, then follow the
 
 Never share `/dev` as the team link. Shared dashboards use versioned `/exec` + redeploy after code changes.
 
-#### If user chooses clasp
+#### Clasp path (default for real dashboards)
 
 Prerequisite: Node.js + `@google/clasp` (`npm i -g @google/clasp`), then `clasp login` once.
 
@@ -181,11 +187,25 @@ Prerequisite: Node.js + `@google/clasp` (`npm i -g @google/clasp`), then `clasp 
 6. First shareable URL: Deploy → New deployment → Web app (or `clasp deploy`), copy the `/exec` URL.
 7. Later updates to the **same** URL: `clasp push` then `clasp deploy -i <DEPLOYMENT_ID> -d "note"`.
 
+#### Workspace domain constraint (webapp.access)
+
+If deploy fails because **Anyone** access is disabled by org Google Workspace admin:
+
+1. Set `"webapp"."access"` to `"DOMAIN"` in `appsscript.json` (see §6 example).
+2. Keep **app-level** access control — Whitelist sheet, `ALLOWED_EMAILS`, and/or `ALLOWED_DOMAIN` (see Email Whitelisting below).
+3. **Both URL forms** serve the same deployment:
+   - Standard: `https://script.google.com/macros/s/<deploymentId>/exec`
+   - Org-domain path: `https://script.google.com/a/macros/<org-workspace-domain>/s/<deploymentId>/exec`
+   Use whichever your org shares; they are not separate deployments.
+4. Ensure `https://www.googleapis.com/auth/userinfo.email` is in `oauthScopes` — without it, whitelist email detection fails silently (see **CRITICAL: userinfo.email Scope Required** in Email Whitelisting).
+
+`DOMAIN` + in-code whitelist is the recommended default for internal org dashboards when org policy blocks `"ANYONE"`.
+
 #### If user chooses browser-only
 
 1. Deploy → New deployment → Web app
 2. Execute as: Me (user deploying)
-3. Who has access: Anyone (if using email whitelisting in code)
+3. Who has access: **Anyone within org domain** (`DOMAIN`) or **Anyone** — per org policy; pair with in-code email whitelisting when using broad deploy access
 4. Copy the `/exec` URL
 5. **Re-authorize when prompted** — Google will ask for spreadsheet access
 6. Later code changes still need Manage deployments → Edit → New version (Head `/dev` is not a shared production link)
@@ -193,7 +213,7 @@ Prerequisite: Node.js + `@google/clasp` (`npm i -g @google/clasp`), then `clasp 
 ## Email Whitelisting (Access Control)
 
 Instead of managing access through Google's deployment settings (which requires redeployment every time you add/remove users), implement email whitelisting in the script. This allows:
-- Deploy once with broad access ("Anyone" or "Anyone with Google account")
+- Deploy once with broad access (`DOMAIN` or `Anyone`, depending on org policy — see §7 Workspace domain constraint)
 - Control who can access via code or a Whitelist sheet
 - No redeployment needed when access changes
 
@@ -252,7 +272,7 @@ function getSpreadsheet() {
 // ============================================================
 const ACCESS_CONFIG = {
   ENABLED: true,
-  ALLOWED_DOMAIN: '',             // e.g., '@redhat.com' - leave empty to disable domain check
+  ALLOWED_DOMAIN: '',             // e.g., '@company.com' - leave empty to disable domain check
   ALLOWED_EMAILS: [               // Hardcoded fallback emails
     'admin@example.com',
   ],
